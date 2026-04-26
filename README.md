@@ -4,7 +4,7 @@
   <strong>Predict crop yield with real-time weather intelligence, multi-factor analysis, and smart farming recommendations.</strong>
 </p>
 
-<p align="center">
+<p  align="center">
   <img src="https://img.shields.io/badge/Node.js-v18+-339933?logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white" alt="Express" />
   <img src="https://img.shields.io/badge/MongoDB-Atlas-47A248?logo=mongodb&logoColor=white" alt="MongoDB" />
