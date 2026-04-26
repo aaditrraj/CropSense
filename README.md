@@ -1,7 +1,7 @@
 # 🌾 CropSense — AI-Powered Crop Yield Prediction Portal
 
 <p align="center">
-  <strong>Predict crop yields with real-time weather intelligence, multi-factor analysis, and smart farming recommendations.</strong>
+  <strong>Predict crop yield with real-time weather intelligence, multi-factor analysis, and smart farming recommendations.</strong>
 </p>
 
 <p align="center">
