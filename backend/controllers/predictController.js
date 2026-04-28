@@ -7,8 +7,44 @@
 const { fetchCurrentWeather, fetchSeasonalAverages } = require('../../services/weatherService');
 const { predictYield } = require('../../services/predictionEngine');
 const { crops } = require('../../data/crops');
-const { cropPrices } = require('../../data/prices');
+const { fetchLiveMarketPrice, getStoredPrice } = require('../../services/marketPriceService');
 const { getPrediction } = require('../models/Prediction');
+
+async function buildRevenueEstimate(cropId, prediction, area, location = {}) {
+  const price = await fetchLiveMarketPrice({ cropId, state: location.state }).catch(() => getStoredPrice(cropId));
+  if (!price) return null;
+  if (!Number.isFinite(Number(price.marketAvg)) || !Number.isFinite(Number(price.costPerHa))) return null;
+
+  const yieldQuintals = prediction.totalYield * 10;
+  const grossMSP = price.msp ? Math.round(yieldQuintals * price.msp) : null;
+  const grossMarket = Math.round(yieldQuintals * price.marketAvg);
+  const costOfCultivation = Math.round(price.costPerHa * area);
+  const netProfit = grossMarket - costOfCultivation;
+
+  return {
+    livePrice: price.live === true,
+    priceSource: price.source,
+    priceNote: price.note || null,
+    priceFetchedAt: price.fetchedAt,
+    market: price.market || null,
+    district: price.district || null,
+    state: price.state || location.state || null,
+    arrivalDate: price.arrivalDate || null,
+    recordsUsed: price.recordsUsed || 0,
+    currency: price.currency || 'INR',
+    unit: price.unit || 'quintal',
+    yieldQuintals: Math.round(yieldQuintals * 10) / 10,
+    msp: price.msp,
+    marketAvg: price.marketAvg,
+    marketHigh: price.marketHigh,
+    grossMSP,
+    grossMarket,
+    grossRevenue: grossMarket,
+    costOfCultivation,
+    netProfit,
+    profitable: netProfit >= 0
+  };
+}
 
 /**
  * POST /api/predict
@@ -23,7 +59,7 @@ async function predict(req, res) {
     // Fetch current weather and historical seasonal averages in parallel
     const [weather, seasonalData] = await Promise.all([
       fetchCurrentWeather(parsedLat, parsedLon),
-      fetchSeasonalAverages(parsedLat, parsedLon, season, 10).catch(err => {
+      fetchSeasonalAverages(parsedLat, parsedLon, season, 5).catch(err => {
         console.warn('Historical data fetch failed, falling back to current weather:', err.message);
         return null;
       })
@@ -48,6 +84,7 @@ async function predict(req, res) {
       weatherData: predictionWeather,
       lat: parsedLat
     });
+    const revenue = await buildRevenueEstimate(cropId, result.prediction, parseFloat(area), req.body.location || {});
 
     // Auto-save if user is authenticated
     if (req.user) {
@@ -70,7 +107,7 @@ async function predict(req, res) {
           temperature: predictionWeather.avgTemperature,
           humidity: predictionWeather.avgHumidity,
           precipitation: predictionWeather.totalSeasonalPrecipitation || predictionWeather.totalPrecipitation7d,
-          fullResult: { ...result, weather: { current: weather.current, daily: weather.daily } }
+          fullResult: { ...result, revenue, weather: { current: weather.current, daily: weather.daily } }
         });
       } catch (saveErr) {
         console.warn('Auto-save prediction failed:', saveErr.message);
@@ -81,6 +118,7 @@ async function predict(req, res) {
       success: true,
       data: {
         ...result,
+        revenue,
         weather: {
           current: weather.current,
           daily: weather.daily
@@ -116,7 +154,7 @@ async function compare(req, res) {
 
     const [weather, seasonalData] = await Promise.all([
       fetchCurrentWeather(parsedLat, parsedLon),
-      fetchSeasonalAverages(parsedLat, parsedLon, season, 10).catch(() => null)
+      fetchSeasonalAverages(parsedLat, parsedLon, season, 5).catch(() => null)
     ]);
 
     const predictionWeather = {
@@ -128,13 +166,15 @@ async function compare(req, res) {
       dataSource: seasonalData ? 'historical' : 'forecast'
     };
 
-    const results = cropIds.map(cropId => {
+    const results = await Promise.all(cropIds.map(async cropId => {
       try {
-        return predictYield({ cropId, season, soilType, area: parseFloat(area), weatherData: predictionWeather, lat: parsedLat });
+        const result = predictYield({ cropId, season, soilType, area: parseFloat(area), weatherData: predictionWeather, lat: parsedLat });
+        result.revenue = await buildRevenueEstimate(cropId, result.prediction, parseFloat(area), req.body.location || {});
+        return result;
       } catch (err) {
         return { cropId, error: err.message };
       }
-    });
+    }));
 
     results.sort((a, b) => {
       if (a.error) return 1;
@@ -164,7 +204,7 @@ async function bestCrop(req, res) {
 
     const [weather, seasonalData] = await Promise.all([
       fetchCurrentWeather(parsedLat, parsedLon),
-      fetchSeasonalAverages(parsedLat, parsedLon, season, 10).catch(() => null)
+      fetchSeasonalAverages(parsedLat, parsedLon, season, 5).catch(() => null)
     ]);
 
     const predictionWeather = {
@@ -177,25 +217,15 @@ async function bestCrop(req, res) {
     };
 
     const allCropIds = crops.map(c => c.id);
-    const results = allCropIds.map(cropId => {
+    const results = await Promise.all(allCropIds.map(async cropId => {
       try {
         const result = predictYield({ cropId, season, soilType, area: parseFloat(area), weatherData: predictionWeather, lat: parsedLat });
-        const price = cropPrices[cropId];
-        if (price) {
-          const yieldQuintals = result.prediction.totalYield * 10;
-          result.revenue = {
-            msp: price.msp,
-            marketAvg: price.marketAvg,
-            grossRevenue: Math.round(yieldQuintals * (price.marketAvg || price.msp)),
-            costOfCultivation: Math.round(price.costPerHa * parseFloat(area)),
-            netProfit: Math.round(yieldQuintals * (price.marketAvg || price.msp) - price.costPerHa * parseFloat(area))
-          };
-        }
+        result.revenue = await buildRevenueEstimate(cropId, result.prediction, parseFloat(area), req.body.location || {});
         return result;
       } catch (err) {
         return { crop: { id: cropId }, error: err.message };
       }
-    });
+    }));
 
     results.sort((a, b) => {
       if (a.error) return 1;

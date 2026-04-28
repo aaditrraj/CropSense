@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const { crops, soilTypes, seasons } = require('../../data/crops');
 const { cropPrices } = require('../../data/prices');
+const { fetchLiveMarketPrice } = require('../../services/marketPriceService');
 
 router.get('/crops', (req, res) => {
   res.json({
@@ -30,6 +31,20 @@ router.get('/crops', (req, res) => {
 
 router.get('/prices', (req, res) => {
   res.json({ success: true, data: cropPrices });
+});
+
+router.get('/prices/live', async (req, res) => {
+  try {
+    const { cropId, state, market } = req.query;
+    if (!cropId) {
+      return res.status(400).json({ success: false, error: 'cropId is required.' });
+    }
+
+    const price = await fetchLiveMarketPrice({ cropId, state, market });
+    res.json({ success: true, data: price });
+  } catch (err) {
+    res.status(500).json({ success: false, error: 'Failed to fetch market price.' });
+  }
 });
 
 module.exports = router;

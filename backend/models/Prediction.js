@@ -35,6 +35,13 @@ const predictionSchema = new mongoose.Schema({
   confidence: { type: Number },
   yieldRating: { type: String },
 
+  // Harvest feedback for real measured accuracy
+  actualYieldPerHectare: { type: Number },
+  actualTotalYield: { type: Number },
+  errorPercent: { type: Number },
+  accuracyPercent: { type: Number },
+  actualRecordedAt: { type: Date },
+
   // Weather snapshot
   temperature: { type: Number },
   humidity: { type: Number },

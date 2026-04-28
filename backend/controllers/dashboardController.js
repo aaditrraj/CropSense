@@ -28,6 +28,8 @@ async function getStats(req, res) {
           data: {
             totalPredictions: 0,
             avgConfidence: 0,
+            avgAccuracy: null,
+            measuredPredictions: 0,
             avgYield: 0,
             topCrop: null,
             topRating: null,
@@ -40,6 +42,10 @@ async function getStats(req, res) {
 
       const avgConfidence = userPredictions.reduce((s, p) => s + (p.confidence || 0), 0) / total;
       const avgYield = userPredictions.reduce((s, p) => s + (p.yieldPerHectare || 0), 0) / total;
+      const measured = userPredictions.filter(p => Number.isFinite(p.accuracyPercent));
+      const avgAccuracy = measured.length
+        ? measured.reduce((s, p) => s + p.accuracyPercent, 0) / measured.length
+        : null;
 
       // Most common crop
       const cropCounts = {};
@@ -58,6 +64,8 @@ async function getStats(req, res) {
         data: {
           totalPredictions: total,
           avgConfidence: Math.round(avgConfidence * 10) / 10,
+          avgAccuracy: avgAccuracy === null ? null : Math.round(avgAccuracy * 10) / 10,
+          measuredPredictions: measured.length,
           avgYield: Math.round(avgYield * 100) / 100,
           topCrop: topCrop ? { name: topCrop[0], count: topCrop[1] } : null,
           topRating: Object.entries(ratingDist).sort((a, b) => b[1] - a[1])[0]?.[0] || null,
@@ -76,6 +84,7 @@ async function getStats(req, res) {
           _id: null,
           totalPredictions: { $sum: 1 },
           avgConfidence: { $avg: '$confidence' },
+          avgAccuracy: { $avg: '$accuracyPercent' },
           avgYield: { $avg: '$yieldPerHectare' },
           lastPrediction: { $max: '$createdAt' }
         }
@@ -114,6 +123,8 @@ async function getStats(req, res) {
       data: {
         totalPredictions: stats?.totalPredictions || 0,
         avgConfidence: Math.round((stats?.avgConfidence || 0) * 10) / 10,
+        avgAccuracy: stats?.avgAccuracy == null ? null : Math.round(stats.avgAccuracy * 10) / 10,
+        measuredPredictions: await Prediction.countDocuments({ user: req.user._id, accuracyPercent: { $exists: true } }),
         avgYield: Math.round((stats?.avgYield || 0) * 100) / 100,
         topCrop: topCropAgg[0] ? { name: topCropAgg[0]._id, count: topCropAgg[0].count, emoji: topCropAgg[0].emoji } : null,
         topRating: Object.entries(ratingDist).sort((a, b) => b[1] - a[1])[0]?.[0] || null,

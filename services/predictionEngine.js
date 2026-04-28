@@ -56,31 +56,25 @@ function calcTemperatureScore(avgTemp, crop) {
  const optimalMid = (optimalTempMin + optimalTempMax) / 2;
  const optimalRange = optimalTempMax - optimalTempMin;
 
- // Sigma controls how fast the score drops outside the optimal range
- // Wider optimal range = more forgiving crop
- const sigma = optimalRange * 0.65;
+ // Moderate sigma = gradual falloff outside optimal range
+ const sigma = optimalRange * 0.55;
 
- // Base score: Gaussian centered on optimal midpoint
  let score;
  if (avgTemp >= optimalTempMin && avgTemp <= optimalTempMax) {
- // Within optimal range — score between 0.88 and 1.0
  const distFromCenter = Math.abs(avgTemp - optimalMid);
  const maxDist = optimalRange / 2;
- score = 0.88 + 0.12 * (1 - distFromCenter / maxDist);
+ score = 0.85 + 0.15 * (1 - distFromCenter / maxDist);
  } else {
- // Outside optimal range — Gaussian falloff
  const distFromEdge = avgTemp < optimalTempMin
  ? optimalTempMin - avgTemp
  : avgTemp - optimalTempMax;
- score = 0.88 * gaussian(distFromEdge, 0, sigma);
+ score = 0.82 * gaussian(distFromEdge, 0, sigma);
  }
 
  // Critical temperature penalty — hard limits
  if (criticalTempMin !== undefined && avgTemp <= criticalTempMin) {
- // Below critical minimum → yield collapses
- score *= 0.05; // near zero
+ score *= 0.08; // very low — crop struggles severely
  } else if (criticalTempMin !== undefined && avgTemp < optimalTempMin) {
- // Between critical and optimal min — apply frost sensitivity
  const frostZone = optimalTempMin - criticalTempMin;
  const distFromCritical = avgTemp - criticalTempMin;
  const frostPenalty = smoothStep(0, frostZone, distFromCritical);
@@ -88,10 +82,8 @@ function calcTemperatureScore(avgTemp, crop) {
  }
 
  if (criticalTempMax !== undefined && avgTemp >= criticalTempMax) {
- // Above critical maximum → yield collapses
- score *= 0.05;
+ score *= 0.08;
  } else if (criticalTempMax !== undefined && avgTemp > optimalTempMax) {
- // Between optimal and critical max — apply heat sensitivity
  const heatZone = criticalTempMax - optimalTempMax;
  const distFromCritical = criticalTempMax - avgTemp;
  const heatPenalty = smoothStep(0, heatZone, distFromCritical);
@@ -104,46 +96,36 @@ function calcTemperatureScore(avgTemp, crop) {
 /**
  * Calculate rainfall/water score (0.0 – 1.0)
  *
- * v3: Asymmetric scoring — water deficit hurts more than excess for
- * drought-sensitive crops, while excess hurts more for waterlog-sensitive crops.
- * Uses smooth sigmoid transitions instead of linear.
+ * UPGRADE: Now uses the industry-standard FAO Irrigation and Drainage Paper No. 33
+ * formula for Yield Response to Water: (1 - Ya/Ym) = Ky * (1 - ETa/ETc)
  */
-function calcRainfallScore(seasonalPrecip, crop) {
- const { waterNeedMin, waterNeedMax, droughtTolerance, waterlogTolerance } = crop;
- const optimalMid = (waterNeedMin + waterNeedMax) / 2;
- const optimalRange = waterNeedMax - waterNeedMin;
-
- // Within optimal range
- if (seasonalPrecip >= waterNeedMin && seasonalPrecip <= waterNeedMax) {
- const distFromCenter = Math.abs(seasonalPrecip - optimalMid);
- const maxDist = optimalRange / 2;
- return 0.88 + 0.12 * (1 - distFromCenter / maxDist);
- }
-
- // Too little water — deficit scoring
- if (seasonalPrecip < waterNeedMin) {
- const deficit = waterNeedMin - seasonalPrecip;
- const deficitRatio = deficit / waterNeedMin; // 0 (at min) to 1 (at zero rainfall)
-
- // Drought tolerance modulates how quickly score drops
- // Low tolerance (0.1) = score drops fast. High tolerance (0.8) = score drops slowly.
- const steepness = 2.5 - droughtTolerance * 1.5; // 1.0 – 2.5
-
- // Smooth exponential decay
- const score = 0.88 * Math.exp(-steepness * deficitRatio * deficitRatio);
- return clamp(score, 0, 1);
- }
-
- // Too much water — excess scoring
- const excess = seasonalPrecip - waterNeedMax;
- const excessRatio = excess / waterNeedMax; // relative excess
-
- // Waterlog tolerance modulates decline
- // Low tolerance (0.1) = score drops fast. High tolerance (0.9) = tolerates flooding.
- const steepness = 3.0 - waterlogTolerance * 2.5; // 0.5 – 3.0
-
- const score = 0.88 * Math.exp(-steepness * excessRatio * excessRatio);
- return clamp(score, 0, 1);
+function calcRainfallScore(seasonalPrecip, crop, weatherData) {
+  // Simplified Blaney-Criddle ET0 (Reference Evapotranspiration) in mm/day
+  const p = 0.27; // Mean daily percentage of annual daytime hours
+  const et0Daily = p * (0.46 * weatherData.avgTemperature + 8.13); 
+  const etcDaily = et0Daily * (crop.cropCoefficient || 0.85); // Crop ET
+  const etcSeason = etcDaily * crop.growthDuration; // Total seasonal water need
+  
+  // Effective rainfall (approx 75% due to runoff and deep percolation)
+  const effectiveRain = seasonalPrecip * 0.75;
+  const eta = Math.min(effectiveRain, etcSeason); // Actual Evapotranspiration
+  
+  // Yield response factor (Ky). Maps drought tolerance (0-1) to Ky (0.8 - 1.5)
+  // Higher Ky = more sensitive to water stress
+  const ky = 1.5 - (crop.droughtTolerance * 0.7); 
+  
+  // FAO Formula for relative yield (Ya / Ym)
+  let waterStressScore = 1 - ky * (1 - (eta / etcSeason));
+  
+  // If rainfall is excessively high, apply waterlogging penalty
+  const excess = seasonalPrecip - (etcSeason * 1.5);
+  if (excess > 0) {
+    const excessRatio = excess / (etcSeason * 1.5);
+    const steepness = 2.8 - crop.waterlogTolerance * 2.0; 
+    waterStressScore *= Math.exp(-steepness * excessRatio * excessRatio);
+  }
+  
+  return clamp(waterStressScore, 0.05, 1);
 }
 
 /**
@@ -157,7 +139,7 @@ function calcHumidityScore(avgHumidity, crop) {
  const { optimalHumidityMin, optimalHumidityMax } = crop;
  const optimalMid = (optimalHumidityMin + optimalHumidityMax) / 2;
  const optimalRange = optimalHumidityMax - optimalHumidityMin;
- const sigma = Math.max(optimalRange * 0.6, 10); // minimum sigma of 10
+ const sigma = Math.max(optimalRange * 0.45, 8);
 
  if (avgHumidity >= optimalHumidityMin && avgHumidity <= optimalHumidityMax) {
  const distFromCenter = Math.abs(avgHumidity - optimalMid);
@@ -165,20 +147,16 @@ function calcHumidityScore(avgHumidity, crop) {
  return 0.85 + 0.15 * (1 - (maxDist > 0 ? distFromCenter / maxDist : 0));
  }
 
- // Outside optimal range — Gaussian falloff
  const distFromEdge = avgHumidity < optimalHumidityMin
  ? optimalHumidityMin - avgHumidity
  : avgHumidity - optimalHumidityMax;
 
- // High humidity excess is worse for disease-prone crops
  let effectiveSigma = sigma;
  if (avgHumidity > optimalHumidityMax) {
- // Tighter sigma (faster drop) for crops with low waterlog tolerance
- // (waterlog tolerance correlates with humidity disease resistance)
- effectiveSigma = sigma * (0.6 + crop.waterlogTolerance * 0.6);
+ effectiveSigma = sigma * (0.5 + crop.waterlogTolerance * 0.5);
  }
 
- return clamp(0.85 * gaussian(distFromEdge, 0, effectiveSigma), 0, 1);
+ return clamp(0.82 * gaussian(distFromEdge, 0, effectiveSigma), 0.1, 1);
 }
 
 /**
@@ -192,29 +170,29 @@ function calcSeasonScore(season, crop) {
  return 1.0;
  }
 
- // Annual/Perennial crops grow year-round — they do well in any season
+ // Annual/Perennial crops grow year-round
  if (crop.preferredSeasons.includes('Annual') || crop.preferredSeasons.includes('Perennial')) {
- return 0.85;
+ return 0.80;
  }
- // If user selected Annual/Perennial but crop is seasonal, give moderate score
+ // If user selected Annual/Perennial but crop is seasonal
  if (season === 'Annual' || season === 'Perennial') {
- return 0.6;
+ return 0.45;
  }
 
- // Adjacent season gets a moderate score, opposite season gets lower
- const seasonOrder = ['Rabi', 'Zaid', 'Kharif']; // cycle
+ // Adjacent season gets moderate, opposite gets harsh penalty
+ const seasonOrder = ['Rabi', 'Zaid', 'Kharif'];
  const preferredIdx = seasonOrder.indexOf(crop.preferredSeasons[0]);
  const actualIdx = seasonOrder.indexOf(season);
 
- if (preferredIdx === -1 || actualIdx === -1) return 0.5;
+ if (preferredIdx === -1 || actualIdx === -1) return 0.35;
 
  const distance = Math.min(
  Math.abs(preferredIdx - actualIdx),
  3 - Math.abs(preferredIdx - actualIdx)
  );
 
- // Adjacent season = 0.6, opposite = 0.4
- return distance === 1 ? 0.6 : 0.4;
+ // Adjacent season = 0.50, opposite = 0.25
+ return distance === 1 ? 0.50 : 0.25;
 }
 
 /**
@@ -229,18 +207,16 @@ function calcSoilScore(soilType, crop) {
  const compatibleIdx = crop.compatibleSoils.indexOf(soilType);
 
  if (compatibleIdx === 0) {
- // Primary recommended soil
- return 0.95 + fertility * 0.05; // 0.95–1.0
+ return 0.92 + fertility * 0.08; // 0.92–1.0
  }
 
  if (compatibleIdx > 0) {
- // Other compatible soils — scored by position and fertility
- const positionBonus = Math.max(0, 0.05 - compatibleIdx * 0.015);
- return 0.82 + positionBonus + fertility * 0.08; // ~0.82–0.95
+ const positionBonus = Math.max(0, 0.05 - compatibleIdx * 0.02);
+ return 0.72 + positionBonus + fertility * 0.10; // ~0.72–0.87
  }
 
- // Incompatible soil — base score from fertility, penalized
- return 0.3 + fertility * 0.3; // 0.3–0.6
+ // Incompatible soil — significant penalty but not fatal
+ return 0.25 + fertility * 0.20; // 0.25–0.45
 }
 
 /**
@@ -490,20 +466,39 @@ function predictYield({ cropId, season, soilType, area, weatherData, lat }) {
  if (totalSeasonalPrecipitation !== null && totalSeasonalPrecipitation !== undefined) {
  seasonalPrecip = totalSeasonalPrecipitation;
  } else {
- // Fallback: extrapolate 7-day data with season-awareness
- // Different seasons have different rainfall patterns
- const seasonMultiplier = season === 'Kharif' ? 1.3 : season === 'Zaid' ? 0.7 : 0.5;
- seasonalPrecip = (totalPrecipitation7d / 7) * crop.growthDuration * seasonMultiplier;
+ // Fallback: Blend standard seasonal averages with current 7-day trend
+ // This prevents the accuracy bug where a dry week results in 0mm for the whole season
+ let baseRain = season === 'Kharif' ? 800 : season === 'Zaid' ? 150 : 250;
+ const extrapolated = (totalPrecipitation7d / 7) * crop.growthDuration;
+ // 70% historical average assumption + 30% current trend
+ seasonalPrecip = (baseRain * 0.7) + (extrapolated * 0.3);
  }
 
  // Calculate individual factor scores
  const scores = {
  temperature: calcTemperatureScore(avgTemperature, crop),
- rainfall: calcRainfallScore(seasonalPrecip, crop),
+ rainfall: calcRainfallScore(seasonalPrecip, crop, weatherData), // Uses FAO model
  humidity: calcHumidityScore(avgHumidity, crop),
  season: calcSeasonScore(season, crop),
  soil: calcSoilScore(soilType, crop)
  };
+
+ // UPGRADE: Growing Degree Days (GDD) Thermal Time Calculation
+ // Calculates exact heat accumulation required for crop maturity
+ const tBase = Math.max(5, crop.optimalTempMin - 8); // Estimated base temperature
+ const dailyGDD = Math.max(0, avgTemperature - tBase);
+ const accumulatedGDD = dailyGDD * crop.growthDuration;
+ 
+ const optimalDailyGDD = ((crop.optimalTempMax + crop.optimalTempMin) / 2) - tBase;
+ const optimalGDD = optimalDailyGDD * crop.growthDuration;
+ const gddRatio = accumulatedGDD / optimalGDD;
+ 
+ // Modulate temperature score strictly by GDD accuracy
+ let gddModifier = 1.0;
+ if (gddRatio < 0.85) gddModifier = clamp(gddRatio / 0.85, 0.4, 1.0);
+ else if (gddRatio > 1.15) gddModifier = clamp(1 - (gddRatio - 1.15), 0.4, 1.0);
+ 
+ scores.temperature = scores.temperature * 0.6 + (scores.temperature * gddModifier * 0.4);
 
  // Calculate cross-factor interaction score
  const interactionScore = calcInteractionScore(weatherData, crop, soilType);
@@ -537,34 +532,54 @@ function predictYield({ cropId, season, soilType, area, weatherData, lat }) {
  const soilFertility = soilFertilityMap[soilType] || 0.5;
  const fertilityModifier = 0.9 + soilFertility * 0.15; // 0.9 – 1.05
 
+ // Feasibility gate: if ANY critical factor is extremely low, reduce the overall score
+ const feasibilityFactors = [scores.temperature, scores.rainfall, scores.season];
+ const worstCritical = Math.min(...feasibilityFactors);
+ let feasibilityPenalty = 1.0;
+ if (worstCritical < 0.08) feasibilityPenalty = 0.30; // crop is essentially impossible here
+ else if (worstCritical < 0.15) feasibilityPenalty = 0.50;
+ else if (worstCritical < 0.25) feasibilityPenalty = 0.70;
+ else if (worstCritical < 0.35) feasibilityPenalty = 0.85;
+
  // Calculate predicted yield
- const adjustedScore = compositeScore * climateModifier * fertilityModifier;
- const yieldPerHectare = crop.baseYield * clamp(adjustedScore, 0, 1.1);
+ const adjustedScore = compositeScore * climateModifier * fertilityModifier * feasibilityPenalty;
+ const yieldPerHectare = crop.baseYield * clamp(adjustedScore, 0, 1.05);
  const totalYield = yieldPerHectare * area;
 
  // Confidence calculation — reflects both data quality AND condition alignment
  const yearsOfData = weatherData.yearsOfData || 0;
 
- // Component 1: Data quality confidence (30–50%)
- const dataConfidence = 30 + Math.min(20, yearsOfData * 7);
+ // Component 1: Data quality confidence (25–50%)
+ const dataConfidence = 25 + Math.min(25, yearsOfData * 5);
 
  // Component 2: Condition confidence — higher if scores are clearly good or bad (not ambiguous)
  const scoreStdDev = calcStdDev(Object.values(scores));
  const avgScore = Object.values(scores).reduce((a, b) => a + b, 0) / 5;
- // High average + low variance = high confidence. Low average is also confident (clearly bad).
- const conditionConfidence = 20 + (1 - scoreStdDev) * 10 + (avgScore > 0.7 ? 10 : avgScore < 0.3 ? 8 : 0);
+ const conditionConfidence = 18 + (1 - scoreStdDev) * 10 + (avgScore > 0.7 ? 14 : avgScore < 0.3 ? 5 : 0);
 
- const confidence = clamp(dataConfidence + conditionConfidence, 35, 95);
+ // Penalize confidence when feasibility is low
+ const feasConfPenalty = feasibilityPenalty < 0.5 ? feasibilityPenalty * 0.8 : 1.0;
+ const confidence = clamp((dataConfidence + conditionConfidence) * feasConfPenalty, 20, 95);
 
  // Generate recommendations
  const recommendations = generateRecommendations(scores, crop, weatherData, seasonalPrecip, interactionScore, soilType);
 
+ // Add infeasibility warning when applicable
+ if (feasibilityPenalty < 0.5) {
+ recommendations.unshift({
+  type: 'warning',
+  icon: 'alert-octagon',
+  title: 'Crop Not Recommended for This Region',
+  text: `${crop.name} is not well-suited to these conditions. Key limiting factors make successful cultivation unlikely. Consider alternative crops better adapted to your region.`
+ });
+ }
+
  // Determine yield rating
  let yieldRating;
- if (adjustedScore >= 0.82) yieldRating = 'Excellent';
- else if (adjustedScore >= 0.65) yieldRating = 'Good';
- else if (adjustedScore >= 0.50) yieldRating = 'Average';
- else if (adjustedScore >= 0.35) yieldRating = 'Below Average';
+ if (adjustedScore >= 0.75) yieldRating = 'Excellent';
+ else if (adjustedScore >= 0.58) yieldRating = 'Good';
+ else if (adjustedScore >= 0.40) yieldRating = 'Average';
+ else if (adjustedScore >= 0.22) yieldRating = 'Below Average';
  else yieldRating = 'Poor';
 
  return {

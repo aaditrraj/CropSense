@@ -692,6 +692,9 @@
  <p class="section-desc" id="results-subtitle"></p>
  </div>
 
+ <!-- Viability Verdict Banner -->
+ <div id="viability-verdict" class="viability-verdict"></div>
+
  <!-- Export Buttons -->
  <div class="export-bar">
  <button type="button" id="export-pdf-btn" class="btn btn-outline btn-sm">
@@ -855,7 +858,7 @@
  <div class="dsc-icon"><i data-lucide="target"></i></div>
  <div class="dsc-data">
  <span class="dsc-value" id="dash-avg-confidence">0%</span>
- <span class="dsc-label">Avg Confidence</span>
+ <span class="dsc-label" id="dash-confidence-label">Avg Confidence</span>
  </div>
  </div>
  <div class="dash-stat-card dsc-crop">
@@ -918,6 +921,8 @@
  <th>Crop</th>
  <th>Location</th>
  <th>Yield</th>
+ <th>Actual</th>
+ <th>Accuracy</th>
  <th>Confidence</th>
  <th>Rating</th>
  <th>Date</th>

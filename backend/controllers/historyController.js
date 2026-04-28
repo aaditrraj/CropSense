@@ -113,6 +113,51 @@ async function deletePrediction(req, res) {
 }
 
 /**
+ * PATCH /api/history/:id/actual
+ * Store actual harvested yield and calculate measured prediction accuracy.
+ */
+async function updateActualYield(req, res) {
+  try {
+    const Prediction = getPrediction();
+    const userId = req.user._id || req.user.id;
+    const actualTotalYield = Number(req.body.actualTotalYield);
+
+    if (!Number.isFinite(actualTotalYield) || actualTotalYield <= 0) {
+      return res.status(400).json({ success: false, error: 'Actual total yield must be a positive number.' });
+    }
+
+    const prediction = await Prediction.findOne({ _id: req.params.id, user: userId });
+    if (!prediction) {
+      return res.status(404).json({ success: false, error: 'Prediction not found.' });
+    }
+
+    const predictedTotal = Number(prediction.totalYield) || 0;
+    if (predictedTotal <= 0) {
+      return res.status(400).json({ success: false, error: 'Prediction has no valid predicted yield.' });
+    }
+
+    const area = Number(prediction.area) || 1;
+    const errorPercent = Math.abs(actualTotalYield - predictedTotal) / predictedTotal * 100;
+    const accuracyPercent = Math.max(0, 100 - errorPercent);
+
+    prediction.actualTotalYield = Math.round(actualTotalYield * 100) / 100;
+    prediction.actualYieldPerHectare = Math.round((actualTotalYield / area) * 100) / 100;
+    prediction.errorPercent = Math.round(errorPercent * 10) / 10;
+    prediction.accuracyPercent = Math.round(accuracyPercent * 10) / 10;
+    prediction.actualRecordedAt = new Date();
+
+    if (typeof prediction.save === 'function') {
+      await prediction.save();
+    }
+
+    res.json({ success: true, data: prediction });
+  } catch (err) {
+    console.error('Update actual yield error:', err);
+    res.status(500).json({ success: false, error: 'Failed to update actual yield.' });
+  }
+}
+
+/**
  * DELETE /api/history
  * Clear all prediction history for current user
  */
@@ -130,4 +175,4 @@ async function clearHistory(req, res) {
   }
 }
 
-module.exports = { getHistory, savePrediction, deletePrediction, clearHistory };
+module.exports = { getHistory, savePrediction, deletePrediction, updateActualYield, clearHistory };

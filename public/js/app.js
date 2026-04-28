@@ -681,7 +681,8 @@ async function handlePredict(e) {
  showToast('Prediction completed successfully!', 'success');
 
  // Auto-save to history and refresh dashboard
- await savePrediction();
+ // Pass skipServerSave=true because the backend predict endpoint already auto-saves to MongoDB
+ await savePrediction({ skipServerSave: true });
  if (state.authToken) {
   loadUserDashboard();
  }
@@ -814,6 +815,9 @@ function renderResults(data) {
  $('#result-rain').textContent = `${input.totalSeasonalPrecipitation || input.totalPrecipitation7d} mm${input.dataSource === 'historical' ? ' (seasonal avg)' : ''}`;
  $('#result-humidity').textContent = `Humidity: ${input.avgHumidity}%`;
 
+ // Viability
+ renderViabilityVerdict(data);
+
  // Factor details
  renderFactorDetails(scores);
 
@@ -823,7 +827,7 @@ function renderResults(data) {
  renderForecastChart(weather.daily);
 
  // Revenue
- renderRevenuePanel(crop, prediction);
+ renderRevenuePanel(crop, prediction, data.revenue);
 
  // Irrigation
  renderIrrigationPanel(crop, input, weather);
@@ -839,6 +843,54 @@ function renderResults(data) {
  setTimeout(() => {
  els.resultsSection.scrollIntoView({ behavior: 'smooth' });
  }, 100);
+}
+
+function renderViabilityVerdict(data) {
+ const { crop, prediction, scores, input, revenue } = data;
+ const banner = $('#viability-verdict');
+ if (!banner) return;
+
+ const scorePercent = Math.round(prediction.compositeScore * 100);
+ const confidence = Math.round(prediction.confidence);
+ const criticalFactors = Object.entries(scores)
+  .filter(([, factor]) => factor.value < 0.5)
+  .sort((a, b) => a[1].value - b[1].value)
+  .map(([, factor]) => factor.label);
+
+ const profitable = !revenue || revenue.profitable;
+ let verdict = {
+  className: 'verdict-good',
+  icon: 'check-circle',
+  title: 'Possible to Grow',
+  text: `${crop.name} is suitable for this location, ${input.season} season, and ${input.soilType} soil. Suitability is ${scorePercent}% with ${confidence}% confidence.`
+ };
+
+ if (scorePercent < 35 || confidence < 35) {
+  verdict = {
+   className: 'verdict-poor',
+   icon: 'alert-triangle',
+   title: 'Not Recommended',
+   text: `${crop.name} is risky for these conditions. ${criticalFactors.length ? `Weak factor: ${criticalFactors[0]}. ` : ''}Try a better-matched crop or change season/soil assumptions.`
+  };
+ } else if (scorePercent < 58 || confidence < 55 || !profitable) {
+  verdict = {
+   className: 'verdict-avg',
+   icon: 'alert-circle',
+   title: profitable ? 'Possible, But Risky' : 'Agronomically Possible, Revenue Risk',
+   text: `${crop.name} may grow here, but decision risk is high. ${criticalFactors.length ? `Check ${criticalFactors.slice(0, 2).join(' and ')}. ` : ''}${!profitable ? 'Expected net profit is negative with current stored market prices.' : 'Review irrigation and cost before planting.'}`
+  };
+ }
+
+ banner.className = `viability-verdict ${verdict.className}`;
+ banner.innerHTML = `
+ <i data-lucide="${verdict.icon}"></i>
+ <div>
+ <strong>${verdict.title}</strong>
+ <span>${verdict.text}</span>
+ <small>${input.dataSource === 'historical' ? 'Uses live weather plus historical seasonal averages.' : 'Uses live weather and 7-day forecast fallback.'} ${revenue?.livePrice ? 'Revenue uses live mandi market prices.' : 'Revenue uses stored fallback prices until DATA_GOV_API_KEY is configured.'}</small>
+ </div>
+ `;
+ renderIcons();
 }
 
 // ================================================
@@ -969,53 +1021,67 @@ function renderRecommendations(recs) {
 // ================================================
 // REVENUE ESTIMATOR
 // ================================================
-function renderRevenuePanel(crop, prediction) {
+function renderRevenuePanel(crop, prediction, revenue = null) {
  const panel = $('#revenue-panel');
  const grid = $('#revenue-grid');
 
- if (!state.prices || !state.prices[crop.id]) {
+ if (!revenue && (!state.prices || !state.prices[crop.id])) {
  panel.style.display = 'none';
  return;
  }
  panel.style.display = '';
 
- const price = state.prices[crop.id];
- const yieldQuintals = prediction.totalYield * 10; // tons -> quintals (100 kg)
- const grossMSP = price.msp ? Math.round(yieldQuintals * price.msp) : null;
- const grossMarket = Math.round(yieldQuintals * price.marketAvg);
- const cost = Math.round(price.costPerHa * prediction.area);
- const netMarket = grossMarket - cost;
+ const price = state.prices?.[crop.id] || {};
+ const yieldQuintals = revenue?.yieldQuintals ?? prediction.totalYield * 10; // tons -> quintals (100 kg)
+ const grossMSP = revenue?.grossMSP ?? (price.msp ? Math.round(yieldQuintals * price.msp) : null);
+ const grossMarket = revenue?.grossMarket ?? Math.round(yieldQuintals * price.marketAvg);
+ const cost = revenue?.costOfCultivation ?? Math.round(price.costPerHa * prediction.area);
+ 
+ // Expected profit: Yield is already adjusted by the prediction engine
+ const netProfit = revenue?.netProfit ?? grossMarket - cost;
+ const marketAvg = revenue?.marketAvg ?? price.marketAvg;
+ const msp = revenue?.msp ?? price.msp;
+ const costPerHa = price.costPerHa ?? Math.round(cost / prediction.area);
+ const priceSourceLabel = revenue?.livePrice
+  ? `Live mandi price${revenue.arrivalDate ? ` (${revenue.arrivalDate})` : ''}`
+  : 'Stored fallback price';
 
- const formatINR = (val) => '₹' + val.toLocaleString('en-IN');
+ const formatINR = (val) => 'Rs ' + Math.abs(val).toLocaleString('en-IN');
 
  grid.innerHTML = `
  <div class="revenue-card rc-yield">
+ <i data-lucide="wheat" style="width:20px;height:20px;color:var(--accent-primary);margin-bottom:var(--space-xs)"></i>
  <span class="rc-label">Total Yield</span>
  <span class="rc-value">${yieldQuintals.toFixed(1)} quintals</span>
  <span class="rc-sub">${prediction.totalYield.toFixed(1)} tons</span>
  </div>
- ${price.msp ? `
+ ${msp ? `
  <div class="revenue-card rc-msp">
+ <i data-lucide="landmark" style="width:20px;height:20px;color:var(--amber);margin-bottom:var(--space-xs)"></i>
  <span class="rc-label">MSP Revenue</span>
  <span class="rc-value">${formatINR(grossMSP)}</span>
- <span class="rc-sub">@ ${formatINR(price.msp)}/quintal</span>
+ <span class="rc-sub">@ Rs ${msp.toLocaleString('en-IN')}/quintal</span>
  </div>` : ''}
  <div class="revenue-card rc-market">
- <span class="rc-label">Market Revenue</span>
+ <i data-lucide="store" style="width:20px;height:20px;color:var(--cyan);margin-bottom:var(--space-xs)"></i>
+ <span class="rc-label">Market Revenue Estimate</span>
  <span class="rc-value">${formatINR(grossMarket)}</span>
- <span class="rc-sub">@ ${formatINR(price.marketAvg)}/quintal avg</span>
+ <span class="rc-sub">@ Rs ${marketAvg.toLocaleString('en-IN')}/quintal avg - ${priceSourceLabel}</span>
  </div>
  <div class="revenue-card rc-cost">
+ <i data-lucide="calculator" style="width:20px;height:20px;color:var(--text-secondary);margin-bottom:var(--space-xs)"></i>
  <span class="rc-label">Est. Cultivation Cost</span>
  <span class="rc-value">${formatINR(cost)}</span>
- <span class="rc-sub">@ ${formatINR(price.costPerHa)}/hectare</span>
+ <span class="rc-sub">@ Rs ${costPerHa.toLocaleString('en-IN')}/hectare</span>
  </div>
- <div class="revenue-card ${netMarket >= 0 ? 'rc-profit' : 'rc-loss'}">
- <span class="rc-label">Est. Net Profit</span>
- <span class="rc-value">${formatINR(Math.abs(netMarket))}</span>
- <span class="rc-sub">${netMarket >= 0 ? 'Profit' : 'Loss'} at market price</span>
+ <div class="revenue-card ${netProfit >= 0 ? 'rc-profit' : 'rc-loss'}">
+ <i data-lucide="${netProfit >= 0 ? 'trending-up' : 'trending-down'}" style="width:20px;height:20px;color:${netProfit >= 0 ? 'var(--accent-primary)' : 'var(--red)'};margin-bottom:var(--space-xs)"></i>
+ <span class="rc-label">Expected Net Profit</span>
+ <span class="rc-value">${netProfit >= 0 ? '' : '-'}${formatINR(netProfit)}</span>
+ <span class="rc-sub">${netProfit >= 0 ? 'Expected profit' : 'Expected loss'} (${prediction.confidence.toFixed(0)}% confidence)</span>
  </div>
  `;
+ renderIcons();
 }
 
 // ================================================
@@ -1026,7 +1092,6 @@ function renderIrrigationPanel(crop, input, weather) {
  const kc = crop.cropCoefficient || 0.85;
 
  // Simplified ET0 using Blaney-Criddle method: ET0 = p x (0.46T + 8.13) mm/day
- // p ~ 0.27 for tropical latitudes
  const avgTemp = input.avgTemperature;
  const p = 0.27;
  const et0 = p * (0.46 * avgTemp + 8.13); // mm/day
@@ -1038,42 +1103,60 @@ function renderIrrigationPanel(crop, input, weather) {
  const dailyIrr = deficit > 0 ? (deficit / irrigationDays).toFixed(1) : 0;
  const litersPerHa = deficit * 10000; // 1mm over 1ha = 10,000 liters
 
+ // Efficiency rating
+ const waterRatio = rainfall / totalWaterNeed;
+ let efficiencyClass = 'irr-deficit';
+ let efficiencyLabel = 'Critical Deficit';
+ if (waterRatio >= 1.0) { efficiencyClass = 'irr-surplus'; efficiencyLabel = 'Sufficient'; }
+ else if (waterRatio >= 0.7) { efficiencyClass = 'irr-warning'; efficiencyLabel = 'Moderate Deficit'; }
+ else if (waterRatio >= 0.4) { efficiencyClass = 'irr-deficit'; efficiencyLabel = 'High Deficit'; }
+
  const formatNum = (n) => n.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+ const efficiencyPct = Math.min(100, Math.round(waterRatio * 100));
 
  grid.innerHTML = `
  <div class="irr-card">
- <span class="irr-label">Reference ET0</span>
+ <i data-lucide="thermometer-sun" style="width:18px;height:18px;color:var(--amber);margin-bottom:var(--space-xs)"></i>
+ <span class="irr-label">Reference ET₀</span>
  <span class="irr-value">${et0.toFixed(1)} mm/day</span>
  </div>
  <div class="irr-card">
+ <i data-lucide="sprout" style="width:18px;height:18px;color:var(--accent-primary);margin-bottom:var(--space-xs)"></i>
  <span class="irr-label">Crop ET (Kc=${kc})</span>
  <span class="irr-value">${etc.toFixed(1)} mm/day</span>
  </div>
  <div class="irr-card">
+ <i data-lucide="droplets" style="width:18px;height:18px;color:var(--blue);margin-bottom:var(--space-xs)"></i>
  <span class="irr-label">Season Water Need</span>
  <span class="irr-value">${formatNum(totalWaterNeed)} mm</span>
  </div>
  <div class="irr-card">
+ <i data-lucide="cloud-rain" style="width:18px;height:18px;color:var(--cyan);margin-bottom:var(--space-xs)"></i>
  <span class="irr-label">Expected Rainfall</span>
  <span class="irr-value">${formatNum(rainfall)} mm</span>
  </div>
- <div class="irr-card ${deficit > 0 ? 'irr-deficit' : 'irr-surplus'}">
- <span class="irr-label">${deficit > 0 ? 'Water Deficit' : 'Sufficient Water'}</span>
- <span class="irr-value">${deficit > 0 ? formatNum(deficit) + ' mm' :'✓ No deficit'}</span>
+ <div class="irr-card ${efficiencyClass}">
+ <i data-lucide="${deficit > 0 ? 'alert-triangle' : 'check-circle'}" style="width:18px;height:18px;color:${deficit > 0 ? 'var(--red)' : 'var(--accent-primary)'};margin-bottom:var(--space-xs)"></i>
+ <span class="irr-label">${deficit > 0 ? 'Water Deficit' : 'Water Status'}</span>
+ <span class="irr-value">${deficit > 0 ? formatNum(deficit) + ' mm' : '✓ Sufficient'}</span>
  </div>
- <div class="irr-card">
- <span class="irr-label">Daily Irrigation Need</span>
+ <div class="irr-card ${deficit > 0 ? '' : 'irr-surplus'}">
+ <i data-lucide="pipette" style="width:18px;height:18px;color:var(--cyan);margin-bottom:var(--space-xs)"></i>
+ <span class="irr-label">Daily Irrigation</span>
  <span class="irr-value">${dailyIrr} mm/day</span>
  </div>
  <div class="irr-card">
- <span class="irr-label">Total Water Volume</span>
- <span class="irr-value">${formatNum(litersPerHa)} L/ha</span>
+ <i data-lucide="flask-round" style="width:18px;height:18px;color:var(--blue);margin-bottom:var(--space-xs)"></i>
+ <span class="irr-label">Water Volume/ha</span>
+ <span class="irr-value">${formatNum(litersPerHa)} L</span>
  </div>
  <div class="irr-card">
+ <i data-lucide="settings" style="width:18px;height:18px;color:var(--purple);margin-bottom:var(--space-xs)"></i>
  <span class="irr-label">Recommended Method</span>
- <span class="irr-value">${crop.irrigationMethod}</span>
+ <span class="irr-value" style="font-size:var(--font-sm)">${crop.irrigationMethod}</span>
  </div>
  `;
+ renderIcons();
 }
 
 // ================================================
@@ -1090,41 +1173,59 @@ function renderDiseasePanel(crop, input) {
  const avgHumidity = input.avgHumidity;
 
  grid.innerHTML = crop.diseases.map(disease => {
- // Calculate risk level based on current weather
  const tempInRange = avgTemp >= disease.tempMin && avgTemp <= disease.tempMax;
  const humidityHigh = avgHumidity >= disease.humidityMin;
 
+ // Deterministic risk calculation based on how close conditions are to trigger thresholds
  let riskLevel = 'low';
  let riskColor = 'risk-low';
- let riskPercent = 20;
+ let riskPercent = 15;
+ let advice = 'Conditions are not favorable for this disease. Continue standard monitoring.';
 
  if (tempInRange && humidityHigh) {
+ const humidityExcess = avgHumidity - disease.humidityMin;
+ const tempCenter = (disease.tempMin + disease.tempMax) / 2;
+ const tempProximity = 1 - Math.abs(avgTemp - tempCenter) / ((disease.tempMax - disease.tempMin) / 2);
+ riskPercent = Math.min(95, Math.round(65 + humidityExcess * 1.2 + tempProximity * 15));
  riskLevel = 'high';
  riskColor = 'risk-high';
- riskPercent = 75 + Math.min(25, (avgHumidity - disease.humidityMin) * 1.5);
- } else if (tempInRange || humidityHigh) {
+ advice = 'Apply preventive fungicide/bactericide. Monitor daily and ensure good air circulation.';
+ } else if (tempInRange) {
+ const tempCenter = (disease.tempMin + disease.tempMax) / 2;
+ const tempProximity = 1 - Math.abs(avgTemp - tempCenter) / ((disease.tempMax - disease.tempMin) / 2);
+ const humidityGap = disease.humidityMin - avgHumidity;
+ riskPercent = Math.min(60, Math.round(30 + tempProximity * 15 - humidityGap * 0.3));
  riskLevel = 'moderate';
  riskColor = 'risk-moderate';
- riskPercent = 40 + Math.random() * 20;
+ advice = 'Temperature is in risk range. Watch humidity levels closely — risk may increase.';
+ } else if (humidityHigh) {
+ const humidityExcess = avgHumidity - disease.humidityMin;
+ riskPercent = Math.min(55, Math.round(25 + humidityExcess * 0.8));
+ riskLevel = 'moderate';
+ riskColor = 'risk-moderate';
+ advice = 'Humidity is elevated. Ensure drainage and avoid overhead irrigation.';
  }
 
- riskPercent = Math.min(95, Math.round(riskPercent));
+ riskPercent = Math.max(5, Math.min(95, riskPercent));
 
  return `
  <div class="disease-card ${riskColor}">
  <div class="disease-header">
- <span class="disease-name">${disease.name}</span>
- <span class="disease-risk-badge ${riskColor}">${riskLevel.toUpperCase()}</span>
+ <span class="disease-name"><i data-lucide="${riskLevel === 'high' ? 'alert-triangle' : riskLevel === 'moderate' ? 'alert-circle' : 'shield-check'}" style="width:16px;height:16px;display:inline-block;vertical-align:-2px;margin-right:6px"></i>${disease.name}</span>
+ <span class="disease-risk-badge ${riskColor}">${riskLevel.toUpperCase()} · ${riskPercent}%</span>
  </div>
  <div class="disease-bar">
  <div class="disease-bar-fill" style="width:${riskPercent}%"></div>
  </div>
  <div class="disease-conditions">
- <span>Risk when: Humidity >= ${disease.humidityMin}%, Temp ${disease.tempMin} - ${disease.tempMax}°C</span>
+ <i data-lucide="info" style="width:12px;height:12px;display:inline-block;vertical-align:-1px;margin-right:4px"></i>
+ <strong>Triggers:</strong> Humidity ≥ ${disease.humidityMin}%, Temp ${disease.tempMin}–${disease.tempMax}°C
  </div>
+ <div class="disease-advice"><i data-lucide="lightbulb" style="width:12px;height:12px;display:inline-block;vertical-align:-1px;margin-right:4px"></i>${advice}</div>
  </div>
  `;
  }).join('');
+ renderIcons();
 }
 
 // ================================================
@@ -1471,17 +1572,22 @@ function renderBestFitResults(results) {
 // ================================================
 // PREDICTION HISTORY (localStorage)
 // ================================================
+function getHistoryStorageKey() {
+ const userId = state.currentUser?._id || state.currentUser?.id || state.currentUser?.email;
+ return userId ? `cropsense_history_${userId}` : 'cropsense_history_guest';
+}
+
 function getHistory() {
  try {
- return JSON.parse(localStorage.getItem('cropsense_history') || '[]');
+ return JSON.parse(localStorage.getItem(getHistoryStorageKey()) || '[]');
  } catch { return []; }
 }
 
 function saveHistory(history) {
- localStorage.setItem('cropsense_history', JSON.stringify(history));
+ localStorage.setItem(getHistoryStorageKey(), JSON.stringify(history));
 }
 
-async function savePrediction() {
+async function savePrediction({ skipServerSave = false } = {}) {
  if (!state.predictionResult) return;
 
  const d = state.predictionResult;
@@ -1510,7 +1616,8 @@ async function savePrediction() {
  loadHistory();
 
  // Also persist to server (MongoDB) if logged in
- if (state.authToken) {
+ // Skip if the backend predict endpoint already auto-saved this prediction
+ if (state.authToken && !skipServerSave) {
   try {
    await fetch('/api/history', {
     method: 'POST',
@@ -1603,7 +1710,7 @@ window.deleteHistoryItem = function(id) {
 
 function clearHistory() {
  if (!confirm('Delete all prediction history?')) return;
- localStorage.removeItem('cropsense_history');
+ localStorage.removeItem(getHistoryStorageKey());
  loadHistory();
  showToast('History cleared.', 'info');
 }
@@ -1827,6 +1934,7 @@ async function handleGoogleCredential(response) {
  closeAuthModal();
  updateAuthUI(true);
  showToast(`Welcome, ${json.data.user.name}!`, 'success');
+ loadHistory();
  loadUserDashboard();
  } catch (err) {
  showAuthError(err.message);
@@ -1941,6 +2049,7 @@ async function handleLogin(e) {
     closeAuthModal();
     updateAuthUI(true);
     showToast(`Welcome back, ${json.data.user.name}!`, 'success');
+    loadHistory();
     loadUserDashboard();
   } catch (err) {
     showAuthError(err.message);
@@ -1979,6 +2088,7 @@ async function handleSignup(e) {
  closeAuthModal();
  updateAuthUI(true);
  showToast(`Welcome to CropSense, ${json.data.user.name}!`, 'success');
+ loadHistory();
  loadUserDashboard();
  } catch (err) {
  showAuthError(err.message);
@@ -1995,6 +2105,7 @@ function handleLogout(silent = false) {
  localStorage.removeItem('cropsense_token');
  localStorage.removeItem('cropsense_user');
  updateAuthUI(false);
+ loadHistory();
  closeUserDropdown();
  if (!silent) showToast('Logged out successfully.', 'info');
 }
@@ -2034,7 +2145,9 @@ async function loadUserDashboard() {
 
 function renderDashboardStats(data) {
  $('#dash-total-predictions').textContent = data.totalPredictions;
- $('#dash-avg-confidence').textContent = data.avgConfidence ? `${data.avgConfidence}%` : ' - ';
+ const measured = Number(data.measuredPredictions || 0);
+ $('#dash-avg-confidence').textContent = measured && data.avgAccuracy != null ? `${data.avgAccuracy}%` : (data.avgConfidence ? `${data.avgConfidence}%` : ' - ');
+ $('#dash-confidence-label').textContent = measured ? `Measured Accuracy (${measured})` : 'Avg Confidence';
  $('#dash-top-crop').textContent = data.topCrop ? data.topCrop.name : ' - ';
  $('#dash-avg-yield').textContent = data.avgYield || ' - ';
 }
@@ -2168,15 +2281,22 @@ async function loadDashboardHistory() {
  const date = new Date(p.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
  const ratingClass = (p.yieldRating || '').toLowerCase().replace(/\s+/g, '-');
  const predictionId = encodeURIComponent(p._id);
+ const actualText = p.actualTotalYield ? `${Number(p.actualTotalYield).toFixed(1)} t` : '-';
+ const accuracyText = p.accuracyPercent != null ? `${Number(p.accuracyPercent).toFixed(1)}%` : '-';
  return `
  <tr>
  <td><div class="crop-cell">${escapeHTML(p.cropName)}</div></td>
  <td>${escapeHTML(p.location?.name || '-')}</td>
  <td>${p.totalYield?.toFixed(1) || '-'} t</td>
+ <td>${actualText}</td>
+ <td>${accuracyText}</td>
  <td>${p.confidence?.toFixed(0) || '-'}%</td>
  <td><span class="rating-badge rating-${escapeHTML(ratingClass)}">${escapeHTML(p.yieldRating || '-')}</span></td>
  <td>${date}</td>
  <td>
+ <button class="dash-delete-btn" onclick="recordActualYield('${predictionId}')" title="Record actual yield">
+ <i data-lucide="target"></i>
+ </button>
  <button class="dash-delete-btn" onclick="deleteDashPrediction('${predictionId}')" title="Delete">
  <i data-lucide="trash-2"></i>
  </button>
@@ -2205,6 +2325,36 @@ async function deleteDashPrediction(id) {
  }
  } catch (err) {
  showToast('Delete failed.', 'error');
+ }
+}
+
+/** Record actual harvested yield and calculate measured accuracy */
+async function recordActualYield(id) {
+ if (!state.authToken) return;
+ const value = prompt('Enter actual harvested total yield in tons:');
+ if (value === null) return;
+
+ const actualTotalYield = Number(value);
+ if (!Number.isFinite(actualTotalYield) || actualTotalYield <= 0) {
+  showToast('Enter a valid positive yield in tons.', 'error');
+  return;
+ }
+
+ try {
+  const res = await fetch(`/api/history/${id}/actual`, {
+   method: 'PATCH',
+   headers: authHeaders(),
+   body: JSON.stringify({ actualTotalYield })
+  });
+  const json = await res.json();
+  if (json.success) {
+   showToast(`Actual yield saved. Measured accuracy: ${json.data.accuracyPercent.toFixed(1)}%`, 'success');
+   loadUserDashboard();
+  } else {
+   showToast(json.error || 'Failed to save actual yield.', 'error');
+  }
+ } catch (err) {
+  showToast('Could not save actual yield.', 'error');
  }
 }
 

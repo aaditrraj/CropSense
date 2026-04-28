@@ -8,12 +8,13 @@
 
 const express = require('express');
 const router = express.Router();
-const { getHistory, savePrediction, deletePrediction, clearHistory } = require('../controllers/historyController');
+const { getHistory, savePrediction, deletePrediction, updateActualYield, clearHistory } = require('../controllers/historyController');
 const { requireAuth } = require('../middleware/auth');
 
 // All history routes require authentication
 router.get('/', requireAuth, getHistory);
 router.post('/', requireAuth, savePrediction);
+router.patch('/:id/actual', requireAuth, updateActualYield);
 router.delete('/all', requireAuth, clearHistory);
 router.delete('/:id', requireAuth, deletePrediction);
 
